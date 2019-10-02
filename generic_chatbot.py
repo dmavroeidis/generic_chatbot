@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 
 import torch
 import torch.nn as nn
+from prettytable import PrettyTable
 from torch import optim
 import torch.nn.functional as F
 import csv
@@ -19,6 +20,8 @@ import itertools
 from spellchecker import SpellChecker
 from torch.utils import checkpoint
 
+from embeddings import EmbeddingsLoader
+
 USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
 print("Processing device: ", device)
@@ -26,6 +29,8 @@ print("Processing device: ", device)
 corpus_name = "metalwoz-v1"
 corpus = os.path.join("data", corpus_name, "dialogues")
 print("\ncorpus: \n", corpus)
+
+embeddings_file = "data/glove.6B.50d.txt.gz"
 
 PAD_token = 0  # Used for padding short sentences
 SOS_token = 1  # Start of sentence
@@ -330,6 +335,21 @@ def extractSentencePairs(conversations):
             if inputLine and targetLine:
                 qa_pairs.append([inputLine, targetLine])
     return qa_pairs
+
+
+def load_embeddings(self, embeddings_file, embeddings_mode='word2vec'):
+    """ Load embeddings """
+    embeddings = EmbeddingsLoader()
+    embeddings.load(embeddings_file, mode=embeddings_mode)
+
+    self.logsystem.log_info(f'Loading embeddings.. from  {embeddings_file}')
+
+    loginfo = PrettyTable(['Vocabulary size', 'Dimensionality'])
+    loginfo.add_row([embeddings.vocab_size, embeddings.dim])
+    self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded Embeddings info'))
+
+    del loginfo, embeddings_mode, embeddings_file
+    return embeddings
 
 
 # Turn a Unicode string to plain ASCII, thanks to
@@ -784,6 +804,11 @@ if loadFilename:
     voc.__dict__ = checkpoint['voc_dict']
 
 print('Building encoder and decoder ...')
+# Load existing embeddings
+embeddings = load_embeddings(embeddings_file=embeddings_file)
+embedding_size = embeddings.dim
+print('Embeddings size: ', embedding_size)
+
 # Initialize word embeddings
 embedding = nn.Embedding(voc.num_words, hidden_size)
 if loadFilename:
@@ -846,4 +871,3 @@ decoder.eval()
 searcher = GreedySearchDecoder(encoder, decoder)
 
 evaluateInput(encoder, decoder, searcher, voc)
-

@@ -11,6 +11,7 @@ class EmbeddingsLoader:
 
     def __init__(self):
         """ Initialization """
+
         self.dim = None
         self.vocab_size = None
         self.vocab = None
@@ -19,17 +20,23 @@ class EmbeddingsLoader:
 
     def load(self, embeddings_file, mode='word2vec'):
         """ Load an embeddings file """
-        log.info(f'Loading embeddings from {embeddings_file} ...')
-
+        print(f'Loading embeddings from {embeddings_file} ...')
+        print('Embeddings file: ', embeddings_file)
         extension = embeddings_file.split('.')[-1]
+        print('Split embeddings file...')
 
         if extension == 'vec':
+            print('This is a vectorized embeddings file...')
+
             vectors = KeyedVectors.load_word2vec_format(embeddings_file,
                                                         binary=False)
         elif extension == 'bin':
+            print('This is a binary embeddings file...')
             if mode == 'word2vec':
+                print('WORD2VEC')
                 vectors = KeyedVectors.load_word2vec_format(embeddings_file,
                                                             binary=True)
+                print('Vectors: ', vectors)
             elif mode == 'fasttext':
                 # vectors = FastText.load_fasttext_format(embeddings_file)
                 vectors = KeyedVectors.load_word2vec_format(embeddings_file,
@@ -41,6 +48,7 @@ class EmbeddingsLoader:
                 return
         else:
             log.info('Provide a .vec or a .bin file')
+            print('Provide a .vec or a .bin file')
             return
 
         self.vectors = vectors

@@ -30,7 +30,7 @@ corpus_name = "metalwoz-v1"
 corpus = os.path.join("data", corpus_name, "dialogues")
 print("\ncorpus: \n", corpus)
 
-embeddings_file = "data/glove.6B.50d.txt.gz"
+embeddings_file = "data/GoogleNews-vectors-negative300.bin"
 
 PAD_token = 0  # Used for padding short sentences
 SOS_token = 1  # Start of sentence
@@ -321,6 +321,7 @@ def spell_checker(conversations):
 
     return new_conversations
 
+
 # Extracts pairs of sentences from conversations
 def extractSentencePairs(conversations):
     qa_pairs = []
@@ -337,16 +338,17 @@ def extractSentencePairs(conversations):
     return qa_pairs
 
 
-def load_embeddings(self, embeddings_file, embeddings_mode='word2vec'):
+def load_embeddings(embeddings_file, embeddings_mode='word2vec'):
     """ Load embeddings """
+    print ('Start loading embeddings...')
     embeddings = EmbeddingsLoader()
     embeddings.load(embeddings_file, mode=embeddings_mode)
 
-    self.logsystem.log_info(f'Loading embeddings.. from  {embeddings_file}')
+    # self.logsystem.log_info(f'Loading embeddings.. from {embeddings_file}')
 
     loginfo = PrettyTable(['Vocabulary size', 'Dimensionality'])
     loginfo.add_row([embeddings.vocab_size, embeddings.dim])
-    self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded Embeddings info'))
+    # self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded Embeddings info'))
 
     del loginfo, embeddings_mode, embeddings_file
     return embeddings
@@ -805,7 +807,7 @@ if loadFilename:
 
 print('Building encoder and decoder ...')
 # Load existing embeddings
-embeddings = load_embeddings(embeddings_file=embeddings_file)
+embeddings = load_embeddings(embeddings_file=embeddings_file, embeddings_mode='word2vec')
 embedding_size = embeddings.dim
 print('Embeddings size: ', embedding_size)
 

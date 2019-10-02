@@ -758,7 +758,7 @@ attn_model = 'dot'
 hidden_size = 500   # default 500
 encoder_n_layers = 2
 decoder_n_layers = 2
-dropout = 0.1       # default 0.1
+dropout = 0.5       # default 0.1
 batch_size = 64
 
 # Set checkpoint to load from; set to None if starting from scratch
@@ -802,7 +802,7 @@ print('Models built and ready to go!')
 
 # Configure training/optimization
 clip = 50.0
-teacher_forcing_ratio = 0.5
+teacher_forcing_ratio = 0.5 #default: 1
 learning_rate = 0.0001
 decoder_learning_ratio = 5.0
 n_iteration = 4000

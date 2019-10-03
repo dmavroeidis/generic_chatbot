@@ -2,3 +2,4 @@ venv/
 data/save/
 data/formatted_dialog_lines.txt
 .idea/
+__pycache__/

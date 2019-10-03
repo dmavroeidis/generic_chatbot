@@ -3,21 +3,24 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-import torch
-import torch.nn as nn
-from prettytable import PrettyTable
-from torch import optim
-import torch.nn.functional as F
+import codecs
 import csv
+import itertools
+import os
+import pickle
 import random
 import re
-import os
 import unicodedata
-import codecs
 from io import open
-import itertools
 
+import bcolz
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from prettytable import PrettyTable
 from spellchecker import SpellChecker
+from torch import optim
 from torch.utils import checkpoint
 
 from embeddings import EmbeddingsLoader
@@ -30,7 +33,13 @@ corpus_name = "metalwoz-v1"
 corpus = os.path.join("data", corpus_name, "dialogues")
 print("\ncorpus: \n", corpus)
 
-embeddings_file = "data/GoogleNews-vectors-negative300.bin"
+# embeddings_file = "data/GoogleNews-vectors-negative300.bin"
+glove_path = 'data/glove.6B'
+
+# Load embeddings
+vectors = bcolz.open(f'{glove_path}/6B.50.dat')[:]
+words = pickle.load(open(f'{glove_path}/6B.50_words.pkl', 'rb'))
+word2idx = pickle.load(open(f'{glove_path}/6B.50_idx.pkl', 'rb'))
 
 PAD_token = 0  # Used for padding short sentences
 SOS_token = 1  # Start of sentence
@@ -38,15 +47,15 @@ EOS_token = 2  # End of sentence
 
 MAX_LENGTH = 15  # Maximum sentence length
 
-MIN_COUNT = 3     # Minimum count to expel a word from the vocabulary. default=3
+MIN_COUNT = 3  # Minimum count to expel a word from the vocabulary. default=3
 
+# spell = SpellChecker(distance=2)
+# spell.word_frequency.load_text_file('data/extra_vocabulary.txt', 'UTF-8')
 
-spell = SpellChecker(distance=2)
-spell.word_frequency.load_text_file('data/extra_vocabulary.txt', 'UTF-8')
 # misspelled = spell.unknown(['something', 'is', 'hapenin', 'heree'])
 # for word in misspelled:
 #     print(spell.correction(word))
-    # print(spell.candidates(word))
+# print(spell.candidates(word))
 
 
 class Voc:
@@ -108,13 +117,16 @@ class EncoderRNN(nn.Module):
         # Initialize GRU; the input_size and hidden_size params are both set
         # to 'hidden_size' because our input size is a word embedding with
         # number of features == hidden_size
-        self.gru = nn.GRU(hidden_size, hidden_size, n_layers,
+        self.gru = nn.GRU(input_size=embedding.embedding_dim, hidden_size=hidden_size,
+                          num_layers=n_layers,
                           dropout=(0 if n_layers == 1 else dropout),
                           bidirectional=True)
 
     def forward(self, input_seq, input_lengths, hidden=None):
+
         # Convert word indexes to embeddings
         embedded = self.embedding(input_seq)
+
         # Pack padded batch of sequences for RNN module
         packed = nn.utils.rnn.pack_padded_sequence(embedded, input_lengths)
         # Forward pass through GRU
@@ -196,7 +208,7 @@ class LuongAttnDecoderRNN(nn.Module):
         # Define layers
         self.embedding = embedding
         self.embedding_dropout = nn.Dropout(dropout)
-        self.gru = nn.GRU(hidden_size, hidden_size, n_layers,
+        self.gru = nn.GRU(embedding.embedding_dim, hidden_size, n_layers,
                           dropout=(0 if n_layers == 1 else dropout))
         self.concat = nn.Linear(hidden_size * 2, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
@@ -286,12 +298,12 @@ def loadLines(fileName):
             for utterance in utterances.split('\t'):
                 if "Hello how may I help you?" not in utterance:
                     values.append(utterance)
-                    if not utterance_counter%2:
+                    if not utterance_counter % 2:
                         conversations_list.append(values)
                         values = []
                 utterance_counter += 1
             row_counter += 1
-        print('\n\nconversations list: ' + str(conversations_list))
+        # print('\n\nconversations list: ' + str(conversations_list))
     return conversations_list
 
 
@@ -338,20 +350,20 @@ def extractSentencePairs(conversations):
     return qa_pairs
 
 
-def load_embeddings(embeddings_file, embeddings_mode='word2vec'):
-    """ Load embeddings """
-    print ('Start loading embeddings...')
-    embeddings = EmbeddingsLoader()
-    embeddings.load(embeddings_file, mode=embeddings_mode)
-
-    # self.logsystem.log_info(f'Loading embeddings.. from {embeddings_file}')
-
-    loginfo = PrettyTable(['Vocabulary size', 'Dimensionality'])
-    loginfo.add_row([embeddings.vocab_size, embeddings.dim])
-    # self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded Embeddings info'))
-
-    del loginfo, embeddings_mode, embeddings_file
-    return embeddings
+# def load_embeddings(embeddings_file, embeddings_mode='word2vec'):
+#     """ Load embeddings """
+#     print('Start loading embeddings...')
+#     embeddings = EmbeddingsLoader()
+#     embeddings.load(embeddings_file, mode=embeddings_mode)
+#
+#     # self.logsystem.log_info(f'Loading embeddings.. from {embeddings_file}')
+#
+#     loginfo = PrettyTable(['Vocabulary size', 'Dimensionality'])
+#     loginfo.add_row([embeddings.vocab_size, embeddings.dim])
+#     # self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded Embeddings info'))
+#
+#     del loginfo, embeddings_mode, embeddings_file
+#     return embeddings
 
 
 # Turn a Unicode string to plain ASCII, thanks to
@@ -599,9 +611,9 @@ def train(input_variable, lengths, target_variable, mask, max_target_len,
 
 
 def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
-               decoder_optimizer, embedding, encoder_n_layers, decoder_n_layers,
-               save_dir, n_iteration, batch_size, print_every, save_every, clip,
-               corpus_name, loadFilename):
+               decoder_optimizer, embedding, encoder_n_layers,
+               decoder_n_layers, save_dir, n_iteration, batch_size,
+               print_every, save_every, clip, corpus_name, loadFilename):
     # Load batches for each iteration
     training_batches = [
         batch2TrainData(voc, [random.choice(pairs) for _ in range(batch_size)])
@@ -699,6 +711,21 @@ def evaluateInput(encoder, decoder, searcher, voc):
             print("Error: Encountered unknown word.")
 
 
+def create_emb_layer(weights_matrix, non_trainable=False):
+    num_embeddings = len(weights_matrix)
+    embedding_dim = len(weights_matrix[0])
+    print('Number of embeddings: ', num_embeddings)
+    print('Dimension of embeddings: ', embedding_dim)
+    emb_layer = nn.Embedding(num_embeddings, embedding_dim)
+
+    # emb_layer.load_state_dict({'weight': weights_matrix},
+    # strict=False)
+    if non_trainable:
+        emb_layer.weight.requires_grad = False
+
+    return emb_layer, num_embeddings, embedding_dim
+
+
 # printLines(os.path.join(corpus, "AGREEMENT_BOT.txt"))
 
 # Define path to new file
@@ -711,9 +738,9 @@ delimiter = str(codecs.decode(delimiter, "unicode_escape"))
 # initialize lines dict, conversations list, and field ids
 lines = {}
 conversations = []
-MOVIE_LINES_FIELDS = ["lineID", "characterID", "movieID", "character", "text"]
-MOVIE_CONVERSATIONS_FIELDS = ["character1ID", "character2ID", "movieID",
-                              "utteranceIDs"]
+# MOVIE_LINES_FIELDS = ["lineID", "characterID", "movieID", "character", "text"]
+# MOVIE_CONVERSATIONS_FIELDS = ["character1ID", "character2ID", "movieID",
+#                               "utteranceIDs"]
 
 # Load lines and process conversations
 print("\nProcessing corpus...")
@@ -721,7 +748,7 @@ print("\nProcessing corpus...")
 #     print('FileName: ', file)
 #     print('Corpus: ', corpus)
 #     printLines(os.path.join(corpus, file), 10)
-    # lines += loadLines(os.path.join(corpus, file))
+# lines += loadLines(os.path.join(corpus, file))
 
 # print("\nLoadingConversations...")
 # conversations = loadConversations(
@@ -751,7 +778,6 @@ print("\npairs:\n")
 for pair in pairs[:10]:
     print(pair)
 
-
 # Check for spelling errors. This should be done before removing rare words,
 # as misspelled words should be rare by definition.
 # pairs = spell_checker(pairs)
@@ -777,10 +803,10 @@ model_name = 'cb_model'
 attn_model = 'dot'
 # attn_model = 'general'
 # attn_model = 'concat'
-hidden_size = 500   # default 500
+hidden_size = 500  # default 500
 encoder_n_layers = 2
 decoder_n_layers = 2
-dropout = 0.5       # default 0.1
+dropout = 0.1  # default 0.1
 batch_size = 64
 
 # Set checkpoint to load from; set to None if starting from scratch
@@ -805,20 +831,45 @@ if loadFilename:
     embedding_sd = checkpoint['embedding']
     voc.__dict__ = checkpoint['voc_dict']
 
+vectors = bcolz.open(f'{glove_path}/6B.50.dat')[:]
+words = pickle.load(open(f'{glove_path}/6B.50_words.pkl', 'rb'))
+word2idx = pickle.load(open(f'{glove_path}/6B.50_idx.pkl', 'rb'))
+glove = {w: vectors[word2idx[w]] for w in words}
+
 print('Building encoder and decoder ...')
-# Load existing embeddings
-embeddings = load_embeddings(embeddings_file=embeddings_file, embeddings_mode='word2vec')
-embedding_size = embeddings.dim
-print('Embeddings size: ', embedding_size)
+# Load glove embeddings
+print("Number of words in vocabulary: ", voc.num_words)
+matrix_length = voc.num_words
+weights_matrix = np.zeros((voc.num_words, 50))
+# print('Length of weights_matrix: ', len(weights_matrix))
+words_found = 0
+# print("voc: ", voc.index2word.values())
+# print("voc index2word.values() size: ", len(voc.index2word.values()))
+# print('glove.values() size: ', len(glove.values()))
+for i, word in enumerate(voc.index2word.values()):
+    # print('i: ', i)
+    try:
+        weights_matrix[i] = glove[word]
+        words_found += 1
+    except KeyError:
+        weights_matrix[i] = np.random.normal(scale=0.6, size=50)
+
+# print(f'Found {words_found} words.')
+# print('weights_matrix size: ', len(weights_matrix))
+# print('weights_matrix secondary size: ', str(weights_matrix[0].size))
+# print('weights_matrix: \n', weights_matrix)
+
+embedding_layer, number_embeddings, embeddings_dimensions = create_emb_layer(
+    weights_matrix)
 
 # Initialize word embeddings
 embedding = nn.Embedding(voc.num_words, hidden_size)
 if loadFilename:
-    embedding.load_state_dict(embedding_sd)
+    embedding_layer.load_state_dict(embedding_sd)
 # Initialize encoder & decoder models
-encoder = EncoderRNN(hidden_size, embedding, encoder_n_layers, dropout)
-decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, voc.num_words,
-                              decoder_n_layers, dropout)
+encoder = EncoderRNN(hidden_size, embedding_layer, encoder_n_layers, dropout)
+decoder = LuongAttnDecoderRNN(attn_model, embedding_layer, hidden_size,
+                              voc.num_words, decoder_n_layers, dropout)
 if loadFilename:
     encoder.load_state_dict(encoder_sd)
     decoder.load_state_dict(decoder_sd)
@@ -829,7 +880,7 @@ print('Models built and ready to go!')
 
 # Configure training/optimization
 clip = 50.0
-teacher_forcing_ratio = 0.5 #default: 1
+teacher_forcing_ratio = 1  # default: 1
 learning_rate = 0.0001
 decoder_learning_ratio = 5.0
 n_iteration = 4000
@@ -863,9 +914,9 @@ for state in decoder_optimizer.state.values():
 # Run training iterations
 print("Starting Training!")
 trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
-           decoder_optimizer, embedding, encoder_n_layers, decoder_n_layers,
-           save_dir, n_iteration, batch_size, print_every, save_every, clip,
-           corpus_name, loadFilename)
+           decoder_optimizer, embedding_layer, encoder_n_layers,
+           decoder_n_layers, save_dir, n_iteration, batch_size, print_every,
+           save_every, clip, corpus_name, loadFilename)
 
 encoder.eval()
 decoder.eval()

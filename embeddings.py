@@ -84,7 +84,7 @@ class EmbeddingsLoader:
         return features / len(tokens)
 
     def get_embedding_matrix(self, utterance, zero_padding=False,
-                             max_length=10):
+                             max_length=15):
         """
         Fetch embeddings for all the tokens in the utterance
         Create a 2d matrix where the row at index i contains the embedding of

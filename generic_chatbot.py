@@ -1,3 +1,20 @@
+"""A simple generic chatbot implementation (by Dimitris Mavroeidis)
+
+This script trains a Neural Network with sample bot discussions. It then runs
+an evaluation phase where the user asks a question and the chatbot answers it.
+It is really a toy project that is meant to check the understanding of how
+NNs work and the quality of the code.
+This work has been adapted from the pytorch chatbot tutorial
+(https://pytorch.org/tutorials/beginner/chatbot_tutorial.html).
+It also used the method for creating and loading pre-trained embeddings from
+the following tutorial:
+https://medium.com/@martinpella/how-to-use-pre-trained-word-embeddings-in-pytorch-71ca59249f76
+This project has been uploaded to github as a private repo for convenience.
+https://github.com/dmavroeidis/generic_chatbot
+
+
+"""
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -5,6 +22,7 @@ from __future__ import unicode_literals
 
 import codecs
 import csv
+import datetime
 import itertools
 import os
 import pickle
@@ -18,12 +36,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from prettytable import PrettyTable
-from spellchecker import SpellChecker
 from torch import optim
 from torch.utils import checkpoint
-
-from embeddings import EmbeddingsLoader
 
 USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
@@ -33,29 +47,25 @@ corpus_name = "metalwoz-v1"
 corpus = os.path.join("data", corpus_name, "dialogues")
 print("\ncorpus: \n", corpus)
 
-# embeddings_file = "data/GoogleNews-vectors-negative300.bin"
-glove_path = 'data/glove.6B'
-
 # Load embeddings
-vectors = bcolz.open(f'{glove_path}/6B.50.dat')[:]
-words = pickle.load(open(f'{glove_path}/6B.50_words.pkl', 'rb'))
-word2idx = pickle.load(open(f'{glove_path}/6B.50_idx.pkl', 'rb'))
+glove_path = 'data/glove.6B'
+EMBEDDING_DIMENSION = 300  # Can be 300, 200, 100, 50
+vectors = bcolz.open(f'{glove_path}/6B.{str(EMBEDDING_DIMENSION)}.dat')[:]
+words = pickle.load(open(f'{glove_path}/6B.'
+                         f'{str(EMBEDDING_DIMENSION)}_words.pkl', 'rb'))
+word2idx = pickle.load(open(f'{glove_path}/6B.'
+                            f'{str(EMBEDDING_DIMENSION)}_idx.pkl', 'rb'))
 
 PAD_token = 0  # Used for padding short sentences
 SOS_token = 1  # Start of sentence
 EOS_token = 2  # End of sentence
 
-MAX_LENGTH = 15  # Maximum sentence length
+MAX_LENGTH = 10  # Maximum sentence length
+MIN_COUNT = 2  # Minimum count to expel a word from the vocabulary. default=3
 
-MIN_COUNT = 3  # Minimum count to expel a word from the vocabulary. default=3
-
+# Define the spell-checking object
 # spell = SpellChecker(distance=2)
 # spell.word_frequency.load_text_file('data/extra_vocabulary.txt', 'UTF-8')
-
-# misspelled = spell.unknown(['something', 'is', 'hapenin', 'heree'])
-# for word in misspelled:
-#     print(spell.correction(word))
-# print(spell.candidates(word))
 
 
 class Voc:
@@ -117,13 +127,12 @@ class EncoderRNN(nn.Module):
         # Initialize GRU; the input_size and hidden_size params are both set
         # to 'hidden_size' because our input size is a word embedding with
         # number of features == hidden_size
-        self.gru = nn.GRU(input_size=embedding.embedding_dim, hidden_size=hidden_size,
-                          num_layers=n_layers,
+        self.gru = nn.GRU(input_size=embedding.embedding_dim,
+                          hidden_size=hidden_size, num_layers=n_layers,
                           dropout=(0 if n_layers == 1 else dropout),
                           bidirectional=True)
 
     def forward(self, input_seq, input_lengths, hidden=None):
-
         # Convert word indexes to embeddings
         embedded = self.embedding(input_seq)
 
@@ -141,13 +150,13 @@ class EncoderRNN(nn.Module):
 
 
 # Luong attention layer
-class Attn(nn.Module):
+class Attention(nn.Module):
     """
 
     """
 
     def __init__(self, method, hidden_size):
-        super(Attn, self).__init__()
+        super(Attention, self).__init__()
         self.method = method
         if self.method not in ['dot', 'general', 'concat']:
             raise ValueError(self.method,
@@ -175,45 +184,44 @@ class Attn(nn.Module):
     def forward(self, hidden, encoder_outputs):
         # Calculate the attention weights (energies) based on the given method
         if self.method == 'general':
-            attn_energies = self.general_score(hidden, encoder_outputs)
+            attention_energies = self.general_score(hidden, encoder_outputs)
         elif self.method == 'concat':
-            attn_energies = self.concat_score(hidden, encoder_outputs)
+            attention_energies = self.concat_score(hidden, encoder_outputs)
         elif self.method == 'dot':
-            attn_energies = self.dot_score(hidden, encoder_outputs)
+            attention_energies = self.dot_score(hidden, encoder_outputs)
 
         # Transpose max_length and batch_size dimensions
-        attn_energies = attn_energies.t()
+        attention_energies = attention_energies.t()
 
         # Return the softmax normalized probability scores (with added
         # dimension)
-        return F.softmax(attn_energies, dim=1).unsqueeze(1)
+        return F.softmax(attention_energies, dim=1).unsqueeze(1)
 
 
-class LuongAttnDecoderRNN(nn.Module):
+class LuongAttentionDecoderRNN(nn.Module):
+    """ Implements the Luong et al. (2015) attention decoder layer.
     """
 
-    """
-
-    def __init__(self, attn_model, embedding, hidden_size, output_size,
-                 n_layers=1, dropout=0.1):
-        super(LuongAttnDecoderRNN, self).__init__()
+    def __init__(self, attention_model, embedding, hidden_size, output_size,
+                 number_of_layers=1, dropout=0.1):
+        super(LuongAttentionDecoderRNN, self).__init__()
 
         # Keep for reference
-        self.attn_model = attn_model
+        self.attn_model = attention_model
         self.hidden_size = hidden_size
         self.output_size = output_size
-        self.n_layers = n_layers
+        self.n_layers = number_of_layers
         self.dropout = dropout
 
         # Define layers
         self.embedding = embedding
         self.embedding_dropout = nn.Dropout(dropout)
-        self.gru = nn.GRU(embedding.embedding_dim, hidden_size, n_layers,
-                          dropout=(0 if n_layers == 1 else dropout))
+        self.gru = nn.GRU(embedding.embedding_dim, hidden_size, number_of_layers,
+                          dropout=(0 if number_of_layers == 1 else dropout))
         self.concat = nn.Linear(hidden_size * 2, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
 
-        self.attn = Attn(attn_model, hidden_size)
+        self.attn = Attention(attention_model, hidden_size)
 
     def forward(self, input_step, last_hidden, encoder_outputs):
         # Note: we run this one step (word) at a time
@@ -223,10 +231,10 @@ class LuongAttnDecoderRNN(nn.Module):
         # Forward through unidirectional GRU
         rnn_output, hidden = self.gru(embedded, last_hidden)
         # Calculate attention weights from the current GRU output
-        attn_weights = self.attn(rnn_output, encoder_outputs)
+        attention_weights = self.attn(rnn_output, encoder_outputs)
         # Multiply attention weights to encoder outputs to get new "weighted
         # sum" context vector
-        context = attn_weights.bmm(encoder_outputs.transpose(0, 1))
+        context = attention_weights.bmm(encoder_outputs.transpose(0, 1))
         # Concatenate weighted context vector and GRU output using Luong eq. 5
         rnn_output = rnn_output.squeeze(0)
         context = context.squeeze(1)
@@ -285,12 +293,12 @@ def printLines(file, n=10):
 # Keys: 'dialogId-[x]' where x is the number of each pair.
 # Values: a list containing 2 utterances: The first one is the user's
 # utterance and the second one is the system's response.
-def loadLines(fileName):
+def loadLines(file_name):
     conversations_list = []
-    with open(fileName, 'r', encoding='iso-8859-1') as f:
+    with open(file_name, 'r', encoding='iso-8859-1') as f:
         csv_reader = csv.reader(f, delimiter=':')
         row_counter = 0
-        print('File: ', fileName)
+        print('File: ', file_name)
         for row in csv_reader:
             utterances = '\t'.join(row[-1].split('", "'))[3:-3]
             values = []
@@ -308,30 +316,31 @@ def loadLines(fileName):
 
 
 # Checks and corrects spelling errors in the list of conversations
-def spell_checker(conversations):
-    new_conversations = []
-    for pair in conversations:
-        # print('PAIR: ', pair)
-        new_pair = []
-        for utterance in pair:
-            # print('UTTERANCE: ', utterance)
-            new_utterance = []
-            for word in utterance.split(' '):
-                # print('WORD: ', word)
-                try:
-                    if not len(spell.unknown([word])) == 0:
-                        print('Found misspelled word: ', word)
-                        word = spell.correction(word)
-                        print('Corrected to: ', word)
-                except Exception as e:
-                    print("Some kind of error:")
-                    print(str(e))
-
-                new_utterance.append(word)
-            new_pair.append(new_utterance)
-        new_conversations.append(new_pair)
-
-    return new_conversations
+# TODO: Change something the format of the output to work.
+# def spell_checker(conversations):
+#     new_conversations = []
+#     for pair in conversations:
+#         # print('PAIR: ', pair)
+#         new_pair = []
+#         for utterance in pair:
+#             # print('UTTERANCE: ', utterance)
+#             new_utterance = []
+#             for word in utterance.split(' '):
+#                 # print('WORD: ', word)
+#                 try:
+#                     if not len(spell.unknown([word])) == 0:
+#                         print('Found misspelled word: ', word)
+#                         word = spell.correction(word)
+#                         print('Corrected to: ', word)
+#                 except Exception as e:
+#                     print("Some kind of error:")
+#                     print(str(e))
+#
+#                 new_utterance.append(word)
+#             new_pair.append(new_utterance)
+#         new_conversations.append(new_pair)
+#
+#     return new_conversations
 
 
 # Extracts pairs of sentences from conversations
@@ -342,11 +351,11 @@ def extractSentencePairs(conversations):
         for i in range(len(conversation[
                                "lines"]) - 1):  # We ignore the last line (no
             # answer for it)
-            inputLine = conversation["lines"][i]["text"].strip()
-            targetLine = conversation["lines"][i + 1]["text"].strip()
+            input_line = conversation["lines"][i]["text"].strip()
+            target_line = conversation["lines"][i + 1]["text"].strip()
             # Filter wrong samples (if one of the lists is empty)
-            if inputLine and targetLine:
-                qa_pairs.append([inputLine, targetLine])
+            if input_line and target_line:
+                qa_pairs.append([input_line, target_line])
     return qa_pairs
 
 
@@ -360,7 +369,8 @@ def extractSentencePairs(conversations):
 #
 #     loginfo = PrettyTable(['Vocabulary size', 'Dimensionality'])
 #     loginfo.add_row([embeddings.vocab_size, embeddings.dim])
-#     # self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded Embeddings info'))
+#     # self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded
+#     Embeddings info'))
 #
 #     del loginfo, embeddings_mode, embeddings_file
 #     return embeddings
@@ -385,10 +395,10 @@ def normalizeString(s):
 
 
 # Read query/response pairs and return a voc object
-def readVocs(datafile, corpus_name):
+def readVocs(data_file, corpus_name):
     print("Reading lines...")
     # Read the file and split into lines
-    lines = open(datafile, encoding='utf-8').read().strip().split('\n')
+    lines = open(data_file, encoding='utf-8').read().strip().split('\n')
     # Split every line into pairs and normalize
     new_lines = []
 
@@ -406,20 +416,25 @@ def readVocs(datafile, corpus_name):
     return voc, pairs
 
 
-# Returns True iff both sentences in a pair 'p' are under the MAX_LENGTH
-# threshold
-def filterPair(p):
+def filter_pair(p):
+    """ Returns True iff both sentences in a pair 'p' are under the MAX_LENGTH
+    threshold
+    :param p: list
+    :return: boolean
+    """
     # Input sequences need to preserve the last word for EOS token
-    # print('p: ', p)
-    # print('p[0]: ', p[0])
-    # print('p[1]: ', p[1])
     return len(p[0].split(' ')) < MAX_LENGTH and len(
         p[1].split(' ')) < MAX_LENGTH
 
 
-# Filter pairs using filterPair condition
+#
 def filterPairs(pairs):
-    return [pair for pair in pairs if filterPair(pair)]
+    """ Filter pairs using filterPair condition
+
+    :param pairs: list of lists
+    :return: list of lists
+    """
+    return [pair for pair in pairs if filter_pair(pair)]
 
 
 # Using the functions defined above, return a populated voc object and pairs
@@ -494,19 +509,19 @@ def binaryMatrix(l, value=PAD_token):
 def inputVar(l, voc):
     indexes_batch = [indexesFromSentence(voc, sentence) for sentence in l]
     lengths = torch.tensor([len(indexes) for indexes in indexes_batch])
-    padList = zeroPadding(indexes_batch)
-    padVar = torch.LongTensor(padList)
-    return padVar, lengths
+    pad_list = zeroPadding(indexes_batch)
+    pad_var = torch.LongTensor(pad_list)
+    return pad_var, lengths
 
 
 # Returns padded target sequence tensor, padding mask, and max target length
 def outputVar(l, voc):
     indexes_batch = [indexesFromSentence(voc, sentence) for sentence in l]
     max_target_len = max([len(indexes) for indexes in indexes_batch])
-    padList = zeroPadding(indexes_batch)
-    mask = binaryMatrix(padList)
+    pad_list = zeroPadding(indexes_batch)
+    mask = binaryMatrix(pad_list)
     mask = torch.ByteTensor(mask)
-    padVar = torch.LongTensor(padList)
+    padVar = torch.LongTensor(pad_list)
     return padVar, mask, max_target_len
 
 
@@ -518,21 +533,21 @@ def batch2TrainData(voc, pair_batch):
         input_batch.append(pair[0])
         output_batch.append(pair[1])
     inp, lengths = inputVar(input_batch, voc)
-    output, mask, max_target_len = outputVar(output_batch, voc)
-    return inp, lengths, output, mask, max_target_len
+    output, mask, max_target_length = outputVar(output_batch, voc)
+    return inp, lengths, output, mask, max_target_length
 
 
 def maskNLLLoss(inp, target, mask):
-    nTotal = mask.sum()
+    total = mask.sum()
     crossEntropy = -torch.log(
         torch.gather(inp, 1, target.view(-1, 1)).squeeze(1))
     loss = crossEntropy.masked_select(mask).mean()
     loss = loss.to(device)
-    return loss, nTotal.item()
+    return loss, total.item()
 
 
 def train(input_variable, lengths, target_variable, mask, max_target_len,
-          encoder, decoder, embedding, encoder_optimizer, decoder_optimizer,
+          encoder, decoder, encoder_optimizer, decoder_optimizer,
           batch_size, clip, max_length=MAX_LENGTH):
     teacher_forcing_ratio = 0.1
     # Zero gradients
@@ -636,8 +651,8 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
 
         # Run a training iteration with batch
         loss = train(input_variable, lengths, target_variable, mask,
-                     max_target_len, encoder, decoder, embedding,
-                     encoder_optimizer, decoder_optimizer, batch_size, clip)
+                     max_target_len, encoder, decoder, encoder_optimizer,
+                     decoder_optimizer, batch_size, clip)
         print_loss += loss
 
         # Print progress
@@ -711,19 +726,19 @@ def evaluateInput(encoder, decoder, searcher, voc):
             print("Error: Encountered unknown word.")
 
 
-def create_emb_layer(weights_matrix, non_trainable=False):
-    num_embeddings = len(weights_matrix)
-    embedding_dim = len(weights_matrix[0])
-    print('Number of embeddings: ', num_embeddings)
-    print('Dimension of embeddings: ', embedding_dim)
-    emb_layer = nn.Embedding(num_embeddings, embedding_dim)
+def createEmbeddingLayer(weights_matrix, non_trainable=False):
+    number_of_embeddings = len(weights_matrix)
+    embedding_dimension = len(weights_matrix[0])
+    print('Number of embeddings: ', number_of_embeddings)
+    print('Dimension of embeddings: ', embedding_dimension)
+    embedding_layer = nn.Embedding(number_of_embeddings, embedding_dimension)
 
-    # emb_layer.load_state_dict({'weight': weights_matrix},
+    # embedding_layer.load_state_dict({'weight': weights_matrix},
     # strict=False)
     if non_trainable:
-        emb_layer.weight.requires_grad = False
+        embedding_layer.weight.requires_grad = False
 
-    return emb_layer, num_embeddings, embedding_dim
+    return embedding_layer, number_of_embeddings, embedding_dimension
 
 
 # printLines(os.path.join(corpus, "AGREEMENT_BOT.txt"))
@@ -771,7 +786,11 @@ with open(datafile, 'w', encoding='utf-8') as outputfile:
 # printLines(datafile)
 
 # Load/Assemble voc and pairs
-save_dir = os.path.join("data", "save")
+# Create string for datetime
+now = datetime.datetime.now()
+datetime_str = now.strftime("%Y%m%d%H%M%S")
+# save_dir = os.path.join("data", "save", "300dEmbeddings")
+save_dir = os.path.join("data", "save", datetime_str)
 voc, pairs = loadPrepareData(corpus, corpus_name, datafile, save_dir)
 # Print some pairs to validate
 print("\npairs:\n")
@@ -800,13 +819,13 @@ print("max_target_len:\n", max_target_len)
 
 # Configure models
 model_name = 'cb_model'
-attn_model = 'dot'
-# attn_model = 'general'
-# attn_model = 'concat'
+attention_model = 'dot'
+# attention_model = 'general'
+# attention_model = 'concat'
 hidden_size = 500  # default 500
 encoder_n_layers = 2
 decoder_n_layers = 2
-dropout = 0.1  # default 0.1
+dropout = 0.5  # default 0.1
 batch_size = 64
 
 # Set checkpoint to load from; set to None if starting from scratch
@@ -831,16 +850,16 @@ if loadFilename:
     embedding_sd = checkpoint['embedding']
     voc.__dict__ = checkpoint['voc_dict']
 
-vectors = bcolz.open(f'{glove_path}/6B.50.dat')[:]
-words = pickle.load(open(f'{glove_path}/6B.50_words.pkl', 'rb'))
-word2idx = pickle.load(open(f'{glove_path}/6B.50_idx.pkl', 'rb'))
+# vectors = bcolz.open(f'{glove_path}/6B.300.dat')[:]
+# words = pickle.load(open(f'{glove_path}/6B.300_words.pkl', 'rb'))
+# word2idx = pickle.load(open(f'{glove_path}/6B.300_idx.pkl', 'rb'))
 glove = {w: vectors[word2idx[w]] for w in words}
 
 print('Building encoder and decoder ...')
 # Load glove embeddings
 print("Number of words in vocabulary: ", voc.num_words)
 matrix_length = voc.num_words
-weights_matrix = np.zeros((voc.num_words, 50))
+weights_matrix = np.zeros((voc.num_words, EMBEDDING_DIMENSION))
 # print('Length of weights_matrix: ', len(weights_matrix))
 words_found = 0
 # print("voc: ", voc.index2word.values())
@@ -852,24 +871,19 @@ for i, word in enumerate(voc.index2word.values()):
         weights_matrix[i] = glove[word]
         words_found += 1
     except KeyError:
-        weights_matrix[i] = np.random.normal(scale=0.6, size=50)
+        weights_matrix[i] = np.random.normal(scale=0.6, size=EMBEDDING_DIMENSION)
 
-# print(f'Found {words_found} words.')
-# print('weights_matrix size: ', len(weights_matrix))
-# print('weights_matrix secondary size: ', str(weights_matrix[0].size))
-# print('weights_matrix: \n', weights_matrix)
-
-embedding_layer, number_embeddings, embeddings_dimensions = create_emb_layer(
+embedding_layer, number_embeddings, embeddings_dimensions = createEmbeddingLayer(
     weights_matrix)
 
 # Initialize word embeddings
-embedding = nn.Embedding(voc.num_words, hidden_size)
+# embedding = nn.Embedding(voc.num_words, hidden_size)
 if loadFilename:
     embedding_layer.load_state_dict(embedding_sd)
 # Initialize encoder & decoder models
 encoder = EncoderRNN(hidden_size, embedding_layer, encoder_n_layers, dropout)
-decoder = LuongAttnDecoderRNN(attn_model, embedding_layer, hidden_size,
-                              voc.num_words, decoder_n_layers, dropout)
+decoder = LuongAttentionDecoderRNN(attention_model, embedding_layer, hidden_size,
+                                   voc.num_words, decoder_n_layers, dropout)
 if loadFilename:
     encoder.load_state_dict(encoder_sd)
     decoder.load_state_dict(decoder_sd)
@@ -880,8 +894,8 @@ print('Models built and ready to go!')
 
 # Configure training/optimization
 clip = 50.0
-teacher_forcing_ratio = 1  # default: 1
-learning_rate = 0.0001
+teacher_forcing_ratio = 0.5  # default: 1
+learning_rate = 0.0003
 decoder_learning_ratio = 5.0
 n_iteration = 4000
 print_every = 1

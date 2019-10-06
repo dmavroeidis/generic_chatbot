@@ -137,8 +137,12 @@ def loadLines(file_name):
 #     return new_conversations
 
 
-# Extracts pairs of sentences from conversations
 def extractSentencePairs(conversations):
+    """ Extracts pairs of sentences from conversations
+
+    :param conversations: list of lists
+    :return: list of lists
+    """
     qa_pairs = []
     for conversation in conversations:
         # Iterate over all the lines of the conversation
@@ -153,38 +157,24 @@ def extractSentencePairs(conversations):
     return qa_pairs
 
 
-# def load_embeddings(embeddings_file, embeddings_mode='word2vec'):
-#     """ Load embeddings """
-#     print('Start loading embeddings...')
-#     embeddings = EmbeddingsLoader()
-#     embeddings.load(embeddings_file, mode=embeddings_mode)
-#
-#     # self.logsystem.log_info(f'Loading embeddings.. from {embeddings_file}')
-#
-#     loginfo = PrettyTable(['Vocabulary size', 'Dimensionality'])
-#     loginfo.add_row([embeddings.vocab_size, embeddings.dim])
-#     # self.logsystem.log_info('\n' + loginfo.get_string(title='Loaded
-#     Embeddings info'))
-#
-#     del loginfo, embeddings_mode, embeddings_file
-#     return embeddings
-
-
-# Turn a Unicode string to plain ASCII, thanks to
-# https://stackoverflow.com/a/518232/2809427
 def unicodeToAscii(s):
+    """ Turn a Unicode string to plain ASCII, thanks to
+        https://stackoverflow.com/a/518232/2809427
+
+    :param s: str
+    :return: str
+    """
     return ''.join(
         c for c in unicodedata.normalize('NFD', s)
         if unicodedata.category(c) != 'Mn'
     )
 
 
-# Lowercase, trim, and remove non-letter characters
 def normalizeString(s):
-    """
+    """ Lowercase, trim, and remove non-letter characters
 
-    :param s:
-    :return:
+    :param s: str
+    :return: str
     """
     s = unicodeToAscii(s.lower().strip())
     s = re.sub(r"([.!?])", r" \1", s)
@@ -193,13 +183,12 @@ def normalizeString(s):
     return s
 
 
-# Read query/response pairs and return a voc object
 def readVocs(data_file, corpus_name):
-    """
+    """ Read query/response pairs and return a voc object
 
-    :param data_file:
-    :param corpus_name:
-    :return:
+    :param data_file: str
+    :param corpus_name: str
+    :return: Voc
     """
     print("Reading lines...")
     # Read the file and split into lines
@@ -241,10 +230,10 @@ def filterPairs(pairs):
     return [pair for pair in pairs if filter_pair(pair)]
 
 
-# Using the functions defined above, return a populated voc object and pairs
-# list
+
 def loadPrepareData(corpus, corpus_name, datafile, save_dir):
-    """
+    """ Using the functions defined above, return a populated voc object and
+        pairs list
 
     :param corpus:
     :param corpus_name:
@@ -300,32 +289,29 @@ def trimRareWords(voc, pairs, minimum_count):
     return keep_pairs
 
 
-# Returns the indexes of words for an input sentence
 def indexesFromSentence(voc, sentence):
-    """
+    """ Returns the indexes of words for an input sentence
 
-    :param voc:
-    :param sentence:
-    :return:
+    :param voc: Voc
+    :param sentence: str
+    :return: list of indexes
     """
     return [voc.word2index[word] for word in sentence.split(' ')] + [EOS_token]
 
 
-# If the sentence has length less than MAX_LENGHT, pad it with zeroes
 def zeroPadding(l, fillvalue=PAD_token):
-    """
+    """ If the sentence has length less than MAX_LENGHT, pad it with zeroes
 
-    :param l:
-    :param fillvalue:
-    :return:
+    :param l: int
+    :param fillvalue: str
+    :return: list
     """
     return list(itertools.zip_longest(*l, fillvalue=fillvalue))
 
 
-# Create binary matrix. This is the same as the input tensor, but has '1'
-# instead of the word index in the place of the word and 0 elsewhere.
 def binaryMatrix(l, value=PAD_token):
-    """
+    """ Create binary matrix. This is the same as the input tensor, but has '1'
+        instead of the word index in the place of the word and 0 elsewhere.
 
     :param l:
     :param value:
@@ -342,9 +328,8 @@ def binaryMatrix(l, value=PAD_token):
     return m
 
 
-# Returns padded input sequence tensor and lengths
 def inputVar(l, voc):
-    """
+    """ Returns padded input sequence tensor and lengths
 
     :param l:
     :param voc:
@@ -357,9 +342,8 @@ def inputVar(l, voc):
     return pad_var, lengths
 
 
-# Returns padded target sequence tensor, padding mask, and max target length
 def outputVar(l, voc):
-    """
+    """ Returns padded target sequence tensor, padding mask, and max target length
 
     :param l:
     :param voc:
@@ -374,9 +358,8 @@ def outputVar(l, voc):
     return padVar, mask, max_target_len
 
 
-# Returns all items for a given batch of pairs
 def batch2TrainData(voc, pair_batch):
-    """
+    """ Returns all items for a given batch of pairs
 
     :param voc:
     :param pair_batch:
@@ -772,11 +755,8 @@ if loadFilename:
     embedding_sd = checkpoint['embedding']
     voc.__dict__ = checkpoint['voc_dict']
 
-# vectors = bcolz.open(f'{glove_path}/6B.300.dat')[:]
-# words = pickle.load(open(f'{glove_path}/6B.300_words.pkl', 'rb'))
-# word2idx = pickle.load(open(f'{glove_path}/6B.300_idx.pkl', 'rb'))
 glove = {w: vectors[word2idx[w]] for w in words}
-print('GLOVE: ')
+# print('GLOVE: ')
 # i = 0
 # for item in word2idx:
 #     i += 1
@@ -824,7 +804,7 @@ decoder = decoder.to(device)
 print('Models built and ready to go!')
 
 # Configure training/optimization
-clip = 50.0
+clip = 60.0
 teacher_forcing_ratio = 0.8  # default: 1
 learning_rate = 0.00008
 decoder_learning_ratio = 5.0  # default: 5.0

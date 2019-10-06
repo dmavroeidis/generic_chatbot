@@ -1,5 +1,5 @@
-"""A simple generic chatbot implementation (by Dimitris Mavroeidis)
-
+"""A simple generic chatbot implementation
+Code adapted from various sources by Dimitris Mavroeidis.
 This script trains a Neural Network with sample bot discussions. It then runs
 an evaluation phase where the user asks a question and the chatbot answers it.
 It is really a toy project that is meant to check the understanding of how
@@ -11,7 +11,6 @@ the following tutorial:
 https://medium.com/@martinpella/how-to-use-pre-trained-word-embeddings-in-pytorch-71ca59249f76
 This project has been uploaded to github as a private repo for convenience.
 https://github.com/dmavroeidis/generic_chatbot
-
 
 """
 
@@ -35,9 +34,12 @@ import bcolz
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import optim
 from torch.utils import checkpoint
+
+from data import Voc, PAD_token, EOS_token, SOS_token
+from model import EncoderRNN, LuongAttentionDecoderRNN
+from decoder import GreedySearchDecoder
 
 USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
@@ -56,244 +58,36 @@ words = pickle.load(open(f'{glove_path}/6B.'
 word2idx = pickle.load(open(f'{glove_path}/6B.'
                             f'{str(EMBEDDING_DIMENSION)}_idx.pkl', 'rb'))
 
-PAD_token = 0  # Used for padding short sentences
-SOS_token = 1  # Start of sentence
-EOS_token = 2  # End of sentence
-
 MAX_LENGTH = 10  # Maximum sentence length
-MIN_COUNT = 2  # Minimum count to expel a word from the vocabulary. default=3
+MIN_COUNT = 1  # Minimum count to expel a word from the vocabulary. default=3
+
 
 # Define the spell-checking object
 # spell = SpellChecker(distance=2)
 # spell.word_frequency.load_text_file('data/extra_vocabulary.txt', 'UTF-8')
 
 
-class Voc:
-    def __init__(self, name):
-        self.name = name
-        self.trimmed = False
-        self.word2index = {}
-        self.word2count = {}
-        self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS"}
-        self.num_words = 3  # Count SOS, EOS, PAD
-
-    def addSentence(self, sentence):
-        for word in sentence.split(' '):
-            self.addWord(word)
-
-    def addWord(self, word):
-        if word not in self.word2index:
-            self.word2index[word] = self.num_words
-            self.word2count[word] = 1
-            self.index2word[self.num_words] = word
-            self.num_words += 1
-        else:
-            self.word2count[word] += 1
-
-    # Remove words below a certain count threshold
-    def trim(self, min_count):
-        if self.trimmed:
-            return
-        self.trimmed = True
-
-        keep_words = []
-
-        for k, v in self.word2count.items():
-            if v >= min_count:
-                keep_words.append(k)
-
-        print('keep_words {} / {} = {:.4f}'.format(
-            len(keep_words), len(self.word2index),
-            len(keep_words) / len(self.word2index)
-        ))
-
-        # Reinitialize dictionaries
-        self.word2index = {}
-        self.word2count = {}
-        self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS"}
-        self.num_words = 3  # Count default tokens
-
-        for word in keep_words:
-            self.addWord(word)
-
-
-class EncoderRNN(nn.Module):
-    def __init__(self, hidden_size, embedding, n_layers=1, dropout=0):
-        super(EncoderRNN, self).__init__()
-        self.n_layers = n_layers
-        self.hidden_size = hidden_size
-        self.embedding = embedding
-
-        # Initialize GRU; the input_size and hidden_size params are both set
-        # to 'hidden_size' because our input size is a word embedding with
-        # number of features == hidden_size
-        self.gru = nn.GRU(input_size=embedding.embedding_dim,
-                          hidden_size=hidden_size, num_layers=n_layers,
-                          dropout=(0 if n_layers == 1 else dropout),
-                          bidirectional=True)
-
-    def forward(self, input_seq, input_lengths, hidden=None):
-        # Convert word indexes to embeddings
-        embedded = self.embedding(input_seq)
-
-        # Pack padded batch of sequences for RNN module
-        packed = nn.utils.rnn.pack_padded_sequence(embedded, input_lengths)
-        # Forward pass through GRU
-        outputs, hidden = self.gru(packed, hidden)
-        # Unpack padding
-        outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs)
-        # Sum bidirectional GRU outputs
-        outputs = outputs[:, :, :self.hidden_size] + outputs[:, :,
-                                                     self.hidden_size:]
-        # Return output and final hidden state
-        return outputs, hidden
-
-
-# Luong attention layer
-class Attention(nn.Module):
-    """
-
-    """
-
-    def __init__(self, method, hidden_size):
-        super(Attention, self).__init__()
-        self.method = method
-        if self.method not in ['dot', 'general', 'concat']:
-            raise ValueError(self.method,
-                             "is not an appropriate attention method.")
-        self.hidden_size = hidden_size
-        if self.method == 'general':
-            self.attn = nn.Linear(self.hidden_size, hidden_size)
-        elif self.method == 'concat':
-            self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
-            self.v = nn.Parameter(torch.FloatTensor(hidden_size))
-
-    def dot_score(self, hidden, encoder_output):
-        return torch.sum(hidden * encoder_output, dim=2)
-
-    def general_score(self, hidden, encoder_output):
-        energy = self.attn(encoder_output)
-        return torch.sum(hidden * energy, dim=2)
-
-    def concat_score(self, hidden, encoder_output):
-        energy = self.attn(torch.cat(
-            (hidden.expand(encoder_output.size(0), -1, -1), encoder_output),
-            2)).tanh()
-        return torch.sum(self.v * energy, dim=2)
-
-    def forward(self, hidden, encoder_outputs):
-        # Calculate the attention weights (energies) based on the given method
-        if self.method == 'general':
-            attention_energies = self.general_score(hidden, encoder_outputs)
-        elif self.method == 'concat':
-            attention_energies = self.concat_score(hidden, encoder_outputs)
-        elif self.method == 'dot':
-            attention_energies = self.dot_score(hidden, encoder_outputs)
-
-        # Transpose max_length and batch_size dimensions
-        attention_energies = attention_energies.t()
-
-        # Return the softmax normalized probability scores (with added
-        # dimension)
-        return F.softmax(attention_energies, dim=1).unsqueeze(1)
-
-
-class LuongAttentionDecoderRNN(nn.Module):
-    """ Implements the Luong et al. (2015) attention decoder layer.
-    """
-
-    def __init__(self, attention_model, embedding, hidden_size, output_size,
-                 number_of_layers=1, dropout=0.1):
-        super(LuongAttentionDecoderRNN, self).__init__()
-
-        # Keep for reference
-        self.attn_model = attention_model
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.n_layers = number_of_layers
-        self.dropout = dropout
-
-        # Define layers
-        self.embedding = embedding
-        self.embedding_dropout = nn.Dropout(dropout)
-        self.gru = nn.GRU(embedding.embedding_dim, hidden_size, number_of_layers,
-                          dropout=(0 if number_of_layers == 1 else dropout))
-        self.concat = nn.Linear(hidden_size * 2, hidden_size)
-        self.out = nn.Linear(hidden_size, output_size)
-
-        self.attn = Attention(attention_model, hidden_size)
-
-    def forward(self, input_step, last_hidden, encoder_outputs):
-        # Note: we run this one step (word) at a time
-        # Get embedding of current input word
-        embedded = self.embedding(input_step)
-        embedded = self.embedding_dropout(embedded)
-        # Forward through unidirectional GRU
-        rnn_output, hidden = self.gru(embedded, last_hidden)
-        # Calculate attention weights from the current GRU output
-        attention_weights = self.attn(rnn_output, encoder_outputs)
-        # Multiply attention weights to encoder outputs to get new "weighted
-        # sum" context vector
-        context = attention_weights.bmm(encoder_outputs.transpose(0, 1))
-        # Concatenate weighted context vector and GRU output using Luong eq. 5
-        rnn_output = rnn_output.squeeze(0)
-        context = context.squeeze(1)
-        concat_input = torch.cat((rnn_output, context), 1)
-        concat_output = torch.tanh(self.concat(concat_input))
-        # Predict next word using Luong eq. 6
-        output = self.out(concat_output)
-        output = F.softmax(output, dim=1)
-        # Return output and final hidden state
-        return output, hidden
-
-
-class GreedySearchDecoder(nn.Module):
-    def __init__(self, encoder, decoder):
-        super(GreedySearchDecoder, self).__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-
-    def forward(self, input_seq, input_length, max_length):
-        # Forward input through encoder model
-        encoder_outputs, encoder_hidden = self.encoder(input_seq, input_length)
-        # Prepare encoder's final hidden layer to be first hidden input to
-        # the decoder
-        decoder_hidden = encoder_hidden[:decoder.n_layers]
-        # Initialize decoder input with SOS_token
-        decoder_input = \
-            torch.ones(1, 1, device=device, dtype=torch.long) * SOS_token
-        # Initialize tensors to append decoded words to
-        all_tokens = torch.zeros([0], device=device, dtype=torch.long)
-        all_scores = torch.zeros([0], device=device)
-        # Iteratively decode one word token at a time
-        for _ in range(max_length):
-            # Forward pass through decoder
-            decoder_output, decoder_hidden = self.decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
-            # Obtain most likely word token and its softmax score
-            decoder_scores, decoder_input = torch.max(decoder_output, dim=1)
-            # Record token and score
-            all_tokens = torch.cat((all_tokens, decoder_input), dim=0)
-            all_scores = torch.cat((all_scores, decoder_scores), dim=0)
-            # Prepare current token to be next decoder input (add a dimension)
-            decoder_input = torch.unsqueeze(decoder_input, 0)
-        # Return collections of word tokens and scores
-        return all_tokens, all_scores
-
-
-# Print n lines of a file
 def printLines(file, n=10):
+    """ Print n lines of a file
+
+    :param file:
+    :param n:
+    """
     with open(file, 'rb') as datafile:
         lines = datafile.readlines()
     for line in lines[:n]:
         print(line)
 
 
-# Reads an input file and returns a dictionary with:
-# Keys: 'dialogId-[x]' where x is the number of each pair.
-# Values: a list containing 2 utterances: The first one is the user's
-# utterance and the second one is the system's response.
 def loadLines(file_name):
+    """  Reads an input file and returns a dictionary with:
+    Keys: 'dialogId-[x]' where x is the number of each pair.
+    Values: a list containing 2 utterances: The first one is the user's
+    utterance and the second one is the system's response.
+
+    :param file_name: str
+    :return: list of lists
+    """
     conversations_list = []
     with open(file_name, 'r', encoding='iso-8859-1') as f:
         csv_reader = csv.reader(f, delimiter=':')
@@ -387,6 +181,11 @@ def unicodeToAscii(s):
 
 # Lowercase, trim, and remove non-letter characters
 def normalizeString(s):
+    """
+
+    :param s:
+    :return:
+    """
     s = unicodeToAscii(s.lower().strip())
     s = re.sub(r"([.!?])", r" \1", s)
     s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
@@ -396,6 +195,12 @@ def normalizeString(s):
 
 # Read query/response pairs and return a voc object
 def readVocs(data_file, corpus_name):
+    """
+
+    :param data_file:
+    :param corpus_name:
+    :return:
+    """
     print("Reading lines...")
     # Read the file and split into lines
     lines = open(data_file, encoding='utf-8').read().strip().split('\n')
@@ -427,7 +232,6 @@ def filter_pair(p):
         p[1].split(' ')) < MAX_LENGTH
 
 
-#
 def filterPairs(pairs):
     """ Filter pairs using filterPair condition
 
@@ -440,6 +244,14 @@ def filterPairs(pairs):
 # Using the functions defined above, return a populated voc object and pairs
 # list
 def loadPrepareData(corpus, corpus_name, datafile, save_dir):
+    """
+
+    :param corpus:
+    :param corpus_name:
+    :param datafile:
+    :param save_dir:
+    :return:
+    """
     print("Start preparing training data ...")
     voc, pairs = readVocs(datafile, corpus_name)
     print("Read {!s} sentence pairs".format(len(pairs)))
@@ -453,10 +265,17 @@ def loadPrepareData(corpus, corpus_name, datafile, save_dir):
     return voc, pairs
 
 
-def trimRareWords(voc, pairs, MIN_COUNT):
-    # Remove words from the vocabulary that appear less frequently than the
-    # MIN_COUNT
-    voc.trim(MIN_COUNT)
+def trimRareWords(voc, pairs, minimum_count):
+    """ Words that appear less frequently than minimum_count are removed
+    from the vocabulary.
+
+    :param voc: Voc
+    :param pairs: list of lists
+    :param minimum_count: int
+    :return: list of lists
+    """
+
+    voc.trim(minimum_count)
     # Remove pairs that contain trimmed words
     keep_pairs = []
     for pair in pairs:
@@ -483,17 +302,35 @@ def trimRareWords(voc, pairs, MIN_COUNT):
 
 # Returns the indexes of words for an input sentence
 def indexesFromSentence(voc, sentence):
+    """
+
+    :param voc:
+    :param sentence:
+    :return:
+    """
     return [voc.word2index[word] for word in sentence.split(' ')] + [EOS_token]
 
 
 # If the sentence has length less than MAX_LENGHT, pad it with zeroes
 def zeroPadding(l, fillvalue=PAD_token):
+    """
+
+    :param l:
+    :param fillvalue:
+    :return:
+    """
     return list(itertools.zip_longest(*l, fillvalue=fillvalue))
 
 
 # Create binary matrix. This is the same as the input tensor, but has '1'
 # instead of the word index in the place of the word and 0 elsewhere.
 def binaryMatrix(l, value=PAD_token):
+    """
+
+    :param l:
+    :param value:
+    :return:
+    """
     m = []
     for i, seq in enumerate(l):
         m.append([])
@@ -507,6 +344,12 @@ def binaryMatrix(l, value=PAD_token):
 
 # Returns padded input sequence tensor and lengths
 def inputVar(l, voc):
+    """
+
+    :param l:
+    :param voc:
+    :return:
+    """
     indexes_batch = [indexesFromSentence(voc, sentence) for sentence in l]
     lengths = torch.tensor([len(indexes) for indexes in indexes_batch])
     pad_list = zeroPadding(indexes_batch)
@@ -516,6 +359,12 @@ def inputVar(l, voc):
 
 # Returns padded target sequence tensor, padding mask, and max target length
 def outputVar(l, voc):
+    """
+
+    :param l:
+    :param voc:
+    :return:
+    """
     indexes_batch = [indexesFromSentence(voc, sentence) for sentence in l]
     max_target_len = max([len(indexes) for indexes in indexes_batch])
     pad_list = zeroPadding(indexes_batch)
@@ -527,6 +376,12 @@ def outputVar(l, voc):
 
 # Returns all items for a given batch of pairs
 def batch2TrainData(voc, pair_batch):
+    """
+
+    :param voc:
+    :param pair_batch:
+    :return:
+    """
     pair_batch.sort(key=lambda x: len(x[0].split(" ")), reverse=True)
     input_batch, output_batch = [], []
     for pair in pair_batch:
@@ -538,6 +393,13 @@ def batch2TrainData(voc, pair_batch):
 
 
 def maskNLLLoss(inp, target, mask):
+    """
+
+    :param inp:
+    :param target:
+    :param mask:
+    :return:
+    """
     total = mask.sum()
     crossEntropy = -torch.log(
         torch.gather(inp, 1, target.view(-1, 1)).squeeze(1))
@@ -549,6 +411,22 @@ def maskNLLLoss(inp, target, mask):
 def train(input_variable, lengths, target_variable, mask, max_target_len,
           encoder, decoder, encoder_optimizer, decoder_optimizer,
           batch_size, clip, max_length=MAX_LENGTH):
+    """
+
+    :param input_variable:
+    :param lengths:
+    :param target_variable:
+    :param mask:
+    :param max_target_len:
+    :param encoder:
+    :param decoder:
+    :param encoder_optimizer:
+    :param decoder_optimizer:
+    :param batch_size:
+    :param clip:
+    :param max_length:
+    :return:
+    """
     teacher_forcing_ratio = 0.1
     # Zero gradients
     encoder_optimizer.zero_grad()
@@ -629,6 +507,27 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
                decoder_optimizer, embedding, encoder_n_layers,
                decoder_n_layers, save_dir, n_iteration, batch_size,
                print_every, save_every, clip, corpus_name, loadFilename):
+    """
+
+    :param model_name:
+    :param voc:
+    :param pairs:
+    :param encoder:
+    :param decoder:
+    :param encoder_optimizer:
+    :param decoder_optimizer:
+    :param embedding:
+    :param encoder_n_layers:
+    :param decoder_n_layers:
+    :param save_dir:
+    :param n_iteration:
+    :param batch_size:
+    :param print_every:
+    :param save_every:
+    :param clip:
+    :param corpus_name:
+    :param loadFilename:
+    """
     # Load batches for each iteration
     training_batches = [
         batch2TrainData(voc, [random.choice(pairs) for _ in range(batch_size)])
@@ -687,6 +586,16 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
 
 
 def evaluate(encoder, decoder, searcher, voc, sentence, max_length=MAX_LENGTH):
+    """
+
+    :param encoder:
+    :param decoder:
+    :param searcher:
+    :param voc:
+    :param sentence:
+    :param max_length:
+    :return:
+    """
     ### Format input sentence as a batch
     # words -> indexes
     indexes_batch = [indexesFromSentence(voc, sentence)]
@@ -705,6 +614,13 @@ def evaluate(encoder, decoder, searcher, voc, sentence, max_length=MAX_LENGTH):
 
 
 def evaluateInput(encoder, decoder, searcher, voc):
+    """
+
+    :param encoder:
+    :param decoder:
+    :param searcher:
+    :param voc:
+    """
     input_sentence = ''
     while (1):
         try:
@@ -727,6 +643,12 @@ def evaluateInput(encoder, decoder, searcher, voc):
 
 
 def createEmbeddingLayer(weights_matrix, non_trainable=False):
+    """
+
+    :param weights_matrix:
+    :param non_trainable:
+    :return:
+    """
     number_of_embeddings = len(weights_matrix)
     embedding_dimension = len(weights_matrix[0])
     print('Number of embeddings: ', number_of_embeddings)
@@ -825,7 +747,7 @@ attention_model = 'dot'
 hidden_size = 500  # default 500
 encoder_n_layers = 2
 decoder_n_layers = 2
-dropout = 0.5  # default 0.1
+dropout = 0.2  # default 0.1
 batch_size = 64
 
 # Set checkpoint to load from; set to None if starting from scratch
@@ -854,6 +776,13 @@ if loadFilename:
 # words = pickle.load(open(f'{glove_path}/6B.300_words.pkl', 'rb'))
 # word2idx = pickle.load(open(f'{glove_path}/6B.300_idx.pkl', 'rb'))
 glove = {w: vectors[word2idx[w]] for w in words}
+print('GLOVE: ')
+# i = 0
+# for item in word2idx:
+#     i += 1
+#     print(item.value())
+#     if i is 100:
+#         break
 
 print('Building encoder and decoder ...')
 # Load glove embeddings
@@ -871,10 +800,11 @@ for i, word in enumerate(voc.index2word.values()):
         weights_matrix[i] = glove[word]
         words_found += 1
     except KeyError:
-        weights_matrix[i] = np.random.normal(scale=0.6, size=EMBEDDING_DIMENSION)
+        weights_matrix[i] = np.random.normal(scale=0.6,
+                                             size=EMBEDDING_DIMENSION)
 
-embedding_layer, number_embeddings, embeddings_dimensions = createEmbeddingLayer(
-    weights_matrix)
+embedding_layer, number_embeddings, embeddings_dimensions = \
+    createEmbeddingLayer(weights_matrix)
 
 # Initialize word embeddings
 # embedding = nn.Embedding(voc.num_words, hidden_size)
@@ -882,7 +812,8 @@ if loadFilename:
     embedding_layer.load_state_dict(embedding_sd)
 # Initialize encoder & decoder models
 encoder = EncoderRNN(hidden_size, embedding_layer, encoder_n_layers, dropout)
-decoder = LuongAttentionDecoderRNN(attention_model, embedding_layer, hidden_size,
+decoder = LuongAttentionDecoderRNN(attention_model, embedding_layer,
+                                   hidden_size,
                                    voc.num_words, decoder_n_layers, dropout)
 if loadFilename:
     encoder.load_state_dict(encoder_sd)
@@ -893,10 +824,10 @@ decoder = decoder.to(device)
 print('Models built and ready to go!')
 
 # Configure training/optimization
-clip = 50.0
-teacher_forcing_ratio = 0.5  # default: 1
-learning_rate = 0.0003
-decoder_learning_ratio = 5.0
+clip = 30.0
+teacher_forcing_ratio = 0.8  # default: 1
+learning_rate = 0.00008
+decoder_learning_ratio = 5.0  # default: 5.0
 n_iteration = 4000
 print_every = 1
 save_every = 500
@@ -935,6 +866,6 @@ trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
 encoder.eval()
 decoder.eval()
 
-searcher = GreedySearchDecoder(encoder, decoder)
+searcher = GreedySearchDecoder(encoder, decoder, SOS_token)
 
 evaluateInput(encoder, decoder, searcher, voc)

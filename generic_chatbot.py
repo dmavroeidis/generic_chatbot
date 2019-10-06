@@ -824,7 +824,7 @@ decoder = decoder.to(device)
 print('Models built and ready to go!')
 
 # Configure training/optimization
-clip = 30.0
+clip = 50.0
 teacher_forcing_ratio = 0.8  # default: 1
 learning_rate = 0.00008
 decoder_learning_ratio = 5.0  # default: 5.0
@@ -866,6 +866,6 @@ trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
 encoder.eval()
 decoder.eval()
 
-searcher = GreedySearchDecoder(encoder, decoder, SOS_token)
+searcher = GreedySearchDecoder(encoder, decoder, device, SOS_token)
 
 evaluateInput(encoder, decoder, searcher, voc)

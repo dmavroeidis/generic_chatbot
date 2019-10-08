@@ -594,6 +594,8 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
                                                        decoder_n_layers,
                                                        # max_target_len))
                                                        hidden_size))
+            if not os.path.exists(directory):
+                os.makedirs(directory)
             torch.save({
                 'iteration': iteration,
                 'en'       : encoder.state_dict(),

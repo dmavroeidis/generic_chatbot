@@ -20,6 +20,7 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import codecs
+import configparser
 import csv
 import datetime
 import itertools
@@ -28,6 +29,7 @@ import pickle
 import random
 import re
 import unicodedata
+from enum import Enum
 from io import open
 
 import bcolz
@@ -38,8 +40,41 @@ from torch import optim
 from torch.utils import checkpoint
 
 from data import Voc, PAD_token, EOS_token, SOS_token
-from model import EncoderRNN, LuongAttentionDecoderRNN
+from model import EncoderRNN, LuongAttentionDecoderRNN, EmbeddingDimension
 from decoder import GreedySearchDecoder
+
+# Read configuration file
+cfg = configparser.ConfigParser()
+cfg.read('configuration.ini')
+
+# Maximum sentence length. default: 10
+maximum_length = cfg.getint('preprocessing', 'maximum_length')
+# Minimum count to expel a word from the vocabulary. default=3
+minimum_count = cfg.getint('preprocessing', 'minimum_count')
+EMBEDDING_DIMENSION = cfg.getint('model', 'embedding_dimension')
+glove_path = cfg.get('paths', 'glove_path')
+
+# Get the model's settings from the configuration file
+# Configure training/optimization
+clip = cfg.getfloat('model', 'clip')
+teacher_forcing_ratio = cfg.getfloat('model', 'teacher_forcing_ratio')
+learning_rate = cfg.getfloat('model', 'learning_rate')
+decoder_learning_ratio = cfg.getfloat('model', 'decoder_learning_ratio')
+iterations = cfg.getint('model', 'iterations')
+print_every = cfg.getint('model', 'print_every')
+save_every = cfg.getint('model', 'save_every')
+
+# Configure models
+model_name = cfg.get('model', 'name')
+attention_model = cfg.get('model', 'attention_model')
+hidden_size=cfg.getint('model', 'hidden_size')
+dropout = cfg.getfloat('model', 'dropout')
+batch_size = cfg.getint('model', 'batch_size')
+encoder_n_layers = 2
+decoder_n_layers = 2
+
+
+
 
 USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
@@ -49,23 +84,24 @@ corpus_name = "metalwoz-v1"
 corpus = os.path.join("data", corpus_name, "dialogues")
 print("\ncorpus: \n", corpus)
 
+
 # Load embeddings
-glove_path = 'data/glove.6B'
-EMBEDDING_DIMENSION = 300  # Can be 300, 200, 100, 50
+embedding_dimensions = [ 50, 100, 200, 300]
+# The dimensions of Can be 300, 200, 100, 50
+if not EMBEDDING_DIMENSION in embedding_dimensions:
+    print('Not available embedding size. Please choose between 50, 100, '
+           '200 and 300.')
+    exit(1)
+
 vectors = bcolz.open(f'{glove_path}/6B.{str(EMBEDDING_DIMENSION)}.dat')[:]
 words = pickle.load(open(f'{glove_path}/6B.'
                          f'{str(EMBEDDING_DIMENSION)}_words.pkl', 'rb'))
 word2idx = pickle.load(open(f'{glove_path}/6B.'
                             f'{str(EMBEDDING_DIMENSION)}_idx.pkl', 'rb'))
 
-MAX_LENGTH = 10  # Maximum sentence length
-MIN_COUNT = 1  # Minimum count to expel a word from the vocabulary. default=3
-
-
 # Define the spell-checking object
 # spell = SpellChecker(distance=2)
 # spell.word_frequency.load_text_file('data/extra_vocabulary.txt', 'UTF-8')
-
 
 def printLines(file, n=10):
     """ Print n lines of a file
@@ -217,8 +253,8 @@ def filter_pair(p):
     :return: boolean
     """
     # Input sequences need to preserve the last word for EOS token
-    return len(p[0].split(' ')) < MAX_LENGTH and len(
-        p[1].split(' ')) < MAX_LENGTH
+    return len(p[0].split(' ')) < maximum_length and len(
+        p[1].split(' ')) < maximum_length
 
 
 def filterPairs(pairs):
@@ -228,7 +264,6 @@ def filterPairs(pairs):
     :return: list of lists
     """
     return [pair for pair in pairs if filter_pair(pair)]
-
 
 
 def loadPrepareData(corpus, corpus_name, datafile, save_dir):
@@ -343,7 +378,8 @@ def inputVar(l, voc):
 
 
 def outputVar(l, voc):
-    """ Returns padded target sequence tensor, padding mask, and max target length
+    """ Returns padded target sequence tensor, padding mask, and max target
+    length
 
     :param l:
     :param voc:
@@ -393,7 +429,7 @@ def maskNLLLoss(inp, target, mask):
 
 def train(input_variable, lengths, target_variable, mask, max_target_len,
           encoder, decoder, encoder_optimizer, decoder_optimizer,
-          batch_size, clip, max_length=MAX_LENGTH):
+          batch_size, clip, max_length=maximum_length):
     """
 
     :param input_variable:
@@ -568,7 +604,7 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
                             '{}_{}.tar'.format(iteration, 'checkpoint')))
 
 
-def evaluate(encoder, decoder, searcher, voc, sentence, max_length=MAX_LENGTH):
+def evaluate(encoder, decoder, searcher, voc, sentence, max_length=maximum_length):
     """
 
     :param encoder:
@@ -664,16 +700,6 @@ conversations = []
 
 # Load lines and process conversations
 print("\nProcessing corpus...")
-# for file in os.listdir(corpus):
-#     print('FileName: ', file)
-#     print('Corpus: ', corpus)
-#     printLines(os.path.join(corpus, file), 10)
-# lines += loadLines(os.path.join(corpus, file))
-
-# print("\nLoadingConversations...")
-# conversations = loadConversations(
-#     os.path.join(corpus, "movie_conversations.txt"), lines,
-#     MOVIE_CONVERSATIONS_FIELDS)
 
 # Write tsv file
 print("\nWriting newly formatted file...")
@@ -686,15 +712,18 @@ with open(datafile, 'w', encoding='utf-8') as outputfile:
             for pair in loadLines(os.path.join(corpus, file)):
                 writer.writerow(pair)
 
-# Print some ot the lines
-# print("\nSome lines of the file\n")
-# printLines(datafile)
+
+# Print some ot the lines of the datafile just to check the correct format
+print("\nSome lines of the file\n")
+printLines(datafile)
 
 # Load/Assemble voc and pairs
 # Create string for datetime
 now = datetime.datetime.now()
 datetime_str = now.strftime("%Y%m%d%H%M%S")
-# save_dir = os.path.join("data", "save", "300dEmbeddings")
+print("\nExperiment started on: ", datetime_str)
+
+# Each run is saved in a different folder based on date-time stamp.
 save_dir = os.path.join("data", "save", datetime_str)
 voc, pairs = loadPrepareData(corpus, corpus_name, datafile, save_dir)
 # Print some pairs to validate
@@ -708,7 +737,7 @@ for pair in pairs[:10]:
 # TODO: Some issue with the output, which is not exactly as it is expected by
 #  the next step. Should run it again without the correction part to fix it.
 
-pairs = trimRareWords(voc, pairs, MIN_COUNT)
+pairs = trimRareWords(voc, pairs, minimum_count)
 
 # Example for validation
 small_batch_size = 10
@@ -722,20 +751,12 @@ print("target_variable:\n", target_variable)
 print("mask:\n", mask)
 print("max_target_len:\n", max_target_len)
 
-# Configure models
-model_name = 'cb_model'
-attention_model = 'dot'
-# attention_model = 'general'
-# attention_model = 'concat'
-hidden_size = 500  # default 500
-encoder_n_layers = 2
-decoder_n_layers = 2
-dropout = 0.2  # default 0.1
-batch_size = 64
+
 
 # Set checkpoint to load from; set to None if starting from scratch
 loadFilename = None
 checkpoint_iter = 4000
+# Uncomment the following to continue running an experiment.
 # loadFilename = os.path.join(save_dir, model_name, corpus_name,
 #                            '{}-{}_{}'.format(encoder_n_layers,
 #                            decoder_n_layers, hidden_size),
@@ -756,24 +777,13 @@ if loadFilename:
     voc.__dict__ = checkpoint['voc_dict']
 
 glove = {w: vectors[word2idx[w]] for w in words}
-# print('GLOVE: ')
-# i = 0
-# for item in word2idx:
-#     i += 1
-#     print(item.value())
-#     if i is 100:
-#         break
 
 print('Building encoder and decoder ...')
 # Load glove embeddings
 print("Number of words in vocabulary: ", voc.num_words)
 matrix_length = voc.num_words
 weights_matrix = np.zeros((voc.num_words, EMBEDDING_DIMENSION))
-# print('Length of weights_matrix: ', len(weights_matrix))
 words_found = 0
-# print("voc: ", voc.index2word.values())
-# print("voc index2word.values() size: ", len(voc.index2word.values()))
-# print('glove.values() size: ', len(glove.values()))
 for i, word in enumerate(voc.index2word.values()):
     # print('i: ', i)
     try:
@@ -787,7 +797,6 @@ embedding_layer, number_embeddings, embeddings_dimensions = \
     createEmbeddingLayer(weights_matrix)
 
 # Initialize word embeddings
-# embedding = nn.Embedding(voc.num_words, hidden_size)
 if loadFilename:
     embedding_layer.load_state_dict(embedding_sd)
 # Initialize encoder & decoder models
@@ -801,16 +810,14 @@ if loadFilename:
 # Use appropriate device
 encoder = encoder.to(device)
 decoder = decoder.to(device)
-print('Models built and ready to go!')
-
-# Configure training/optimization
-clip = 60.0
-teacher_forcing_ratio = 0.8  # default: 1
-learning_rate = 0.00008
-decoder_learning_ratio = 5.0  # default: 5.0
-n_iteration = 4000
-print_every = 1
-save_every = 500
+print('Models built and ready to go!\n')
+print('dropout ', dropout)
+print('hidden size: ', hidden_size)
+print('clip: ', clip)
+print('teacher_forcing_ratio: ', teacher_forcing_ratio)
+print('learning rate: ', learning_rate)
+print('decoder_learning_ratio: ', decoder_learning_ratio)
+print('number of iterations: ', iterations)
 
 # Ensure dropout layers are in train mode
 encoder.train()
@@ -840,7 +847,7 @@ for state in decoder_optimizer.state.values():
 print("Starting Training!")
 trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
            decoder_optimizer, embedding_layer, encoder_n_layers,
-           decoder_n_layers, save_dir, n_iteration, batch_size, print_every,
+           decoder_n_layers, save_dir, iterations, batch_size, print_every,
            save_every, clip, corpus_name, loadFilename)
 
 encoder.eval()

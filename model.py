@@ -1,6 +1,15 @@
+from enum import Enum
+
 import torch.nn as nn
 import torch
 import torch.nn.functional as f
+
+
+class EmbeddingDimension(Enum):
+    d300 = 300
+    d200 = 200
+    d100 = 100
+    d50 = 50
 
 
 class EncoderRNN(nn.Module):

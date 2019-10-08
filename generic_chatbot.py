@@ -9,7 +9,7 @@ This work has been adapted from the pytorch chatbot tutorial
 It also used the method for creating and loading pre-trained embeddings from
 the following tutorial:
 https://medium.com/@martinpella/how-to-use-pre-trained-word-embeddings-in-pytorch-71ca59249f76
-This project has been uploaded to github as a private repo for convenience.
+This project has been uploaded to github as a public repo for convenience.
 https://github.com/dmavroeidis/generic_chatbot
 
 """
@@ -31,6 +31,7 @@ import re
 import unicodedata
 from enum import Enum
 from io import open
+from shutil import copy, copyfile
 
 import bcolz
 import numpy as np
@@ -561,6 +562,10 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
 
     # Training loop
     print("Training...")
+    # First save the configuration file to the save path
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    copyfile('configuration.ini', os.path.join(save_dir, 'configuration.ini'))
     for iteration in range(start_iteration, n_iteration + 1):
         training_batch = training_batches[iteration - 1]
         # Extract fields from batch
@@ -589,8 +594,6 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
                                                        decoder_n_layers,
                                                        # max_target_len))
                                                        hidden_size))
-            if not os.path.exists(directory):
-                os.makedirs(directory)
             torch.save({
                 'iteration': iteration,
                 'en'       : encoder.state_dict(),

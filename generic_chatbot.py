@@ -29,9 +29,8 @@ import pickle
 import random
 import re
 import unicodedata
-from enum import Enum
 from io import open
-from shutil import copy, copyfile
+from shutil import copyfile
 
 import bcolz
 import numpy as np
@@ -41,7 +40,7 @@ from torch import optim
 from torch.utils import checkpoint
 
 from data import Voc, PAD_token, EOS_token, SOS_token
-from model import EncoderRNN, LuongAttentionDecoderRNN, EmbeddingDimension
+from model import EncoderRNN, LuongAttentionDecoderRNN
 from decoder import GreedySearchDecoder
 
 # Read configuration file
@@ -68,14 +67,11 @@ save_every = cfg.getint('model', 'save_every')
 # Configure models
 model_name = cfg.get('model', 'name')
 attention_model = cfg.get('model', 'attention_model')
-hidden_size=cfg.getint('model', 'hidden_size')
+hidden_size = cfg.getint('model', 'hidden_size')
 dropout = cfg.getfloat('model', 'dropout')
 batch_size = cfg.getint('model', 'batch_size')
 encoder_n_layers = 2
 decoder_n_layers = 2
-
-
-
 
 USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
@@ -85,24 +81,26 @@ corpus_name = "metalwoz-v1"
 corpus = os.path.join("data", corpus_name, "dialogues")
 print("\ncorpus: \n", corpus)
 
-
 # Load embeddings
-embedding_dimensions = [ 50, 100, 200, 300]
+embedding_dimensions = [50, 100, 200, 300]
 # The dimensions of Can be 300, 200, 100, 50
 if not EMBEDDING_DIMENSION in embedding_dimensions:
     print('Not available embedding size. Please choose between 50, 100, '
-           '200 and 300.')
+          '200 and 300.')
     exit(1)
 
 vectors = bcolz.open(f'{glove_path}/6B.{str(EMBEDDING_DIMENSION)}.dat')[:]
-words = pickle.load(open(f'{glove_path}/6B.'
-                         f'{str(EMBEDDING_DIMENSION)}_words.pkl', 'rb'))
-word2idx = pickle.load(open(f'{glove_path}/6B.'
-                            f'{str(EMBEDDING_DIMENSION)}_idx.pkl', 'rb'))
+words = pickle.load(
+    open(f'{glove_path}/6B.'
+         f'{str(EMBEDDING_DIMENSION)}_words.pkl', 'rb'))
+word2idx = pickle.load(
+    open(f'{glove_path}/6B.'
+         f'{str(EMBEDDING_DIMENSION)}_idx.pkl', 'rb'))
 
 # Define the spell-checking object
 # spell = SpellChecker(distance=2)
 # spell.word_frequency.load_text_file('data/extra_vocabulary.txt', 'UTF-8')
+
 
 def printLines(file, n=10):
     """ Print n lines of a file
@@ -183,9 +181,8 @@ def extractSentencePairs(conversations):
     qa_pairs = []
     for conversation in conversations:
         # Iterate over all the lines of the conversation
-        for i in range(len(conversation[
-                               "lines"]) - 1):  # We ignore the last line (no
-            # answer for it)
+        for i in range(len(conversation["lines"]) - 1):
+            # We ignore the last line (no answer for it)
             input_line = conversation["lines"][i]["text"].strip()
             target_line = conversation["lines"][i + 1]["text"].strip()
             # Filter wrong samples (if one of the lists is empty)
@@ -201,10 +198,8 @@ def unicodeToAscii(s):
     :param s: str
     :return: str
     """
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', s)
-        if unicodedata.category(c) != 'Mn'
-    )
+    return ''.join(c for c in unicodedata.normalize('NFD', s)
+                   if unicodedata.category(c) != 'Mn')
 
 
 def normalizeString(s):
@@ -321,7 +316,8 @@ def trimRareWords(voc, pairs, minimum_count):
             keep_pairs.append(pair)
 
     print("Trimmed from {} pairs to {}, {:.4f} of total".format(
-        len(pairs), len(keep_pairs), len(keep_pairs) / len(pairs)))
+        len(pairs), len(keep_pairs),
+        len(keep_pairs) / len(pairs)))
     return keep_pairs
 
 
@@ -428,9 +424,18 @@ def maskNLLLoss(inp, target, mask):
     return loss, total.item()
 
 
-def train(input_variable, lengths, target_variable, mask, max_target_len,
-          encoder, decoder, encoder_optimizer, decoder_optimizer,
-          batch_size, clip, max_length=maximum_length):
+def train(input_variable,
+          lengths,
+          target_variable,
+          mask,
+          max_target_len,
+          encoder,
+          decoder,
+          encoder_optimizer,
+          decoder_optimizer,
+          batch_size,
+          clip,
+          max_length=maximum_length):
     """
 
     :param input_variable:
@@ -481,9 +486,9 @@ def train(input_variable, lengths, target_variable, mask, max_target_len,
     # Forward batch of sequences through decoder one time step at a time
     if use_teacher_forcing:
         for t in range(max_target_len):
-            decoder_output, decoder_hidden = decoder(
-                decoder_input, decoder_hidden, encoder_outputs
-            )
+            decoder_output, decoder_hidden = decoder(decoder_input,
+                                                     decoder_hidden,
+                                                     encoder_outputs)
             # Teacher forcing: next input is current target
             decoder_input = target_variable[t].view(1, -1)
             # Calculate and accumulate loss
@@ -494,9 +499,9 @@ def train(input_variable, lengths, target_variable, mask, max_target_len,
             n_totals += nTotal
     else:
         for t in range(max_target_len):
-            decoder_output, decoder_hidden = decoder(
-                decoder_input, decoder_hidden, encoder_outputs
-            )
+            decoder_output, decoder_hidden = decoder(decoder_input,
+                                                     decoder_hidden,
+                                                     encoder_outputs)
             # No teacher forcing: next input is decoder's own current output
             _, topi = decoder_output.topk(1)
             decoder_input = torch.LongTensor(
@@ -551,7 +556,8 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
     # Load batches for each iteration
     training_batches = [
         batch2TrainData(voc, [random.choice(pairs) for _ in range(batch_size)])
-        for _ in range(n_iteration)]
+        for _ in range(n_iteration)
+    ]
 
     # Initializations
     print('Initializing ...')
@@ -581,35 +587,45 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
         # Print progress
         if iteration % print_every == 0:
             print_loss_avg = print_loss / print_every
-            print(
-                "Iteration: {}; Percent complete: {:.1f}%; Average loss: {"
-                ":.4f}".format(
-                    iteration, iteration / n_iteration * 100, print_loss_avg))
+            print("Iteration: {}; Percent complete: {:.1f}%; Average loss: {"
+                  ":.4f}".format(iteration, iteration / n_iteration * 100,
+                                 print_loss_avg))
             print_loss = 0
 
         # Save checkpoint
         if (iteration % save_every == 0):
-            directory = os.path.join(save_dir, model_name, corpus_name,
-                                     '{}-{}_{}'.format(encoder_n_layers,
-                                                       decoder_n_layers,
-                                                       # max_target_len))
-                                                       hidden_size))
+            directory = os.path.join(
+                save_dir,
+                model_name,
+                corpus_name,
+                '{}-{}_{}'.format(
+                    encoder_n_layers,
+                    decoder_n_layers,
+                    # max_target_len))
+                    hidden_size))
             if not os.path.exists(directory):
                 os.makedirs(directory)
-            torch.save({
-                'iteration': iteration,
-                'en'       : encoder.state_dict(),
-                'de'       : decoder.state_dict(),
-                'en_opt'   : encoder_optimizer.state_dict(),
-                'de_opt'   : decoder_optimizer.state_dict(),
-                'loss'     : loss,
-                'voc_dict' : voc.__dict__,
-                'embedding': embedding.state_dict()
-            }, os.path.join(directory,
-                            '{}_{}.tar'.format(iteration, 'checkpoint')))
+            torch.save(
+                {
+                    'iteration': iteration,
+                    'en': encoder.state_dict(),
+                    'de': decoder.state_dict(),
+                    'en_opt': encoder_optimizer.state_dict(),
+                    'de_opt': decoder_optimizer.state_dict(),
+                    'loss': loss,
+                    'voc_dict': voc.__dict__,
+                    'embedding': embedding.state_dict()
+                },
+                os.path.join(directory,
+                             '{}_{}.tar'.format(iteration, 'checkpoint')))
 
 
-def evaluate(encoder, decoder, searcher, voc, sentence, max_length=maximum_length):
+def evaluate(encoder,
+             decoder,
+             searcher,
+             voc,
+             sentence,
+             max_length=maximum_length):
     """
 
     :param encoder:
@@ -658,8 +674,9 @@ def evaluateInput(encoder, decoder, searcher, voc):
             output_words = evaluate(encoder, decoder, searcher, voc,
                                     input_sentence)
             # Format and print response sentence
-            output_words[:] = [x for x in output_words if
-                               not (x == 'EOS' or x == 'PAD')]
+            output_words[:] = [
+                x for x in output_words if not (x == 'EOS' or x == 'PAD')
+            ]
             print('Bot:', ' '.join(output_words))
 
         except KeyError:
@@ -717,7 +734,6 @@ with open(datafile, 'w', encoding='utf-8') as outputfile:
             for pair in loadLines(os.path.join(corpus, file)):
                 writer.writerow(pair)
 
-
 # Print some ot the lines of the datafile just to check the correct format
 print("\nSome lines of the file\n")
 printLines(datafile)
@@ -746,8 +762,8 @@ pairs = trimRareWords(voc, pairs, minimum_count)
 
 # Example for validation
 small_batch_size = 10
-batches = batch2TrainData(voc, [random.choice(pairs) for _ in
-                                range(small_batch_size)])
+batches = batch2TrainData(
+    voc, [random.choice(pairs) for _ in range(small_batch_size)])
 input_variable, lengths, target_variable, mask, max_target_len = batches
 
 print("input_variable:\n", input_variable)
@@ -755,8 +771,6 @@ print("lengths:\n", lengths)
 print("target_variable:\n", target_variable)
 print("mask:\n", mask)
 print("max_target_len:\n", max_target_len)
-
-
 
 # Set checkpoint to load from; set to None if starting from scratch
 loadFilename = None
@@ -766,7 +780,6 @@ checkpoint_iter = 4000
 #                            '{}-{}_{}'.format(encoder_n_layers,
 #                            decoder_n_layers, hidden_size),
 #                            '{}_checkpoint.tar'.format(checkpoint_iter))
-
 
 # Load model if a loadFilename is provided
 if loadFilename:
@@ -807,8 +820,8 @@ if loadFilename:
 # Initialize encoder & decoder models
 encoder = EncoderRNN(hidden_size, embedding_layer, encoder_n_layers, dropout)
 decoder = LuongAttentionDecoderRNN(attention_model, embedding_layer,
-                                   hidden_size,
-                                   voc.num_words, decoder_n_layers, dropout)
+                                   hidden_size, voc.num_words,
+                                   decoder_n_layers, dropout)
 if loadFilename:
     encoder.load_state_dict(encoder_sd)
     decoder.load_state_dict(decoder_sd)
@@ -831,8 +844,8 @@ decoder.train()
 # Initialize optimizers
 print('Building optimizers ...')
 encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
-decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate *
-                                                        decoder_learning_ratio)
+decoder_optimizer = optim.Adam(decoder.parameters(),
+                               lr=learning_rate * decoder_learning_ratio)
 if loadFilename:
     encoder_optimizer.load_state_dict(encoder_optimizer_sd)
     decoder_optimizer.load_state_dict(decoder_optimizer_sd)
